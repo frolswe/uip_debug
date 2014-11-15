@@ -1,0 +1,167 @@
+diff --git a/utility/Enc28J60Network.cpp b/utility/Enc28J60Network.cpp
+index 7b97be6..cf13cec 100644
+--- a/utility/Enc28J60Network.cpp
++++ b/utility/Enc28J60Network.cpp
+@@ -87,10 +87,11 @@ void Enc28J60Network::init(uint8_t* macaddr)
+   nextPacketPtr = RXSTART_INIT;
+   // Rx start
+   writeRegPair(ERXSTL, RXSTART_INIT);
+-  // set receive pointer address
+-  writeRegPair(ERXRDPTL, RXSTART_INIT);
+   // RX end
+   writeRegPair(ERXNDL, RXSTOP_INIT);
++  // set receive pointer address
++  //writeRegPair(ERXRDPTL, RXSTART_INIT); // TODO: First packet received to even address? Errata 14. /Frol
++  setERXRDPT();
+   // TX start
+   //writeRegPair(ETXSTL, TXSTART_INIT);
+   // TX end
+@@ -167,7 +168,7 @@ Enc28J60Network::receivePacket()
+       len -= 4; //remove the CRC count
+       // read the receive status (see datasheet page 43)
+       rxstat = readOp(ENC28J60_READ_BUF_MEM, 0);
+-      //rxstat |= readOp(ENC28J60_READ_BUF_MEM, 0) << 8;
++      rxstat |= readOp(ENC28J60_READ_BUF_MEM, 0) << 8;
+ #ifdef ENC28J60DEBUG
+       Serial.print("receivePacket [");
+       Serial.print(readPtr,HEX);
+@@ -175,8 +176,24 @@ Enc28J60Network::receivePacket()
+       Serial.print((readPtr+len) % (RXSTOP_INIT+1),HEX);
+       Serial.print("], next: ");
+       Serial.print(nextPacketPtr,HEX);
+-      Serial.print(", stat: ");
++      Serial.print(", stat: 0x");
+       Serial.print(rxstat,HEX);
++      if ((rxstat >>  0) & 0x1) Serial.print(F(" LONG/DROP"));
++      if ((rxstat >>  1) & 0x1) Serial.print(F(" BIT17"));
++      if ((rxstat >>  2) & 0x1) Serial.print(F(" CARRIER"));
++      if ((rxstat >>  3) & 0x1) Serial.print(F(" BIT19"));
++      if ((rxstat >>  4) & 0x1) Serial.print(F(" CRCERR"));
++      if ((rxstat >>  5) & 0x1) Serial.print(F(" LENERR"));
++      if ((rxstat >>  6) & 0x1) Serial.print(F(" LENRANGE"));
++      if ((rxstat >>  7) & 0x1) Serial.print(F(" OK"));
++      if ((rxstat >>  8) & 0x1) Serial.print(F(" MCAST"));
++      if ((rxstat >>  9) & 0x1) Serial.print(F(" BCAST"));
++      if ((rxstat >> 10) & 0x1) Serial.print(F(" DRIBBLE"));
++      if ((rxstat >> 11) & 0x1) Serial.print(F(" CTRL"));
++      if ((rxstat >> 12) & 0x1) Serial.print(F(" PAUSE"));
++      if ((rxstat >> 13) & 0x1) Serial.print(F(" UNKNOWNOP"));
++      if ((rxstat >> 14) & 0x1) Serial.print(F(" VLAN"));
++      if ((rxstat >> 15) & 0x1) Serial.print(F(" ZERO"));
+       Serial.print(", count: ");
+       Serial.print(readReg(EPKTCNT));
+       Serial.print(" -> ");
+@@ -236,7 +253,16 @@ Enc28J60Network::sendPacket(memhandle handle)
+   // send the contents of the transmit buffer onto the network
+   writeOp(ENC28J60_BIT_FIELD_SET, ECON1, ECON1_TXRTS);
+   // wait for transmission to complete or fail
+-  while (((eir = readReg(EIR)) & (EIR_TXIF | EIR_TXERIF)) == 0);
++  uint8_t timeout = 0;
++  {
++    unsigned long timer = millis();
++    while (((eir = readReg(EIR)) & (EIR_TXIF | EIR_TXERIF)) == 0) {
++      if (millis() - timer > 10000) {
++	timeout = 1;
++	break;
++      }
++    }
++  }
+   writeOp(ENC28J60_BIT_FIELD_CLR, ECON1, ECON1_TXRTS);
+ 
+ #ifdef ENC28J60DEBUG
+@@ -247,21 +273,74 @@ Enc28J60Network::sendPacket(memhandle handle)
+   Serial.print(F("-"));
+   Serial.print(start+packet->size,HEX);
+   Serial.print(F("]: "));
++  if (timeout) {
++    Serial.print(F("TIMEOUT "));
++  }
+   for (uint16_t i=start; i<=end; i++)
+     {
+       Serial.print(readByte(i),HEX);
+       Serial.print(" ");
+     }
+   Serial.println();
+-  for (uint16_t i=end+1; i<= end+UIP_SENDBUFFER_PADDING; i++)
+-    {
+-      Serial.print(readByte(i),BIN);
+-      Serial.print(" ");
++  /* Print tsv */
++  {
++    uint16_t i;
++    // Transmit Byte Count
++    i = readByte(end+1);
++    i |= readByte(end+2) << 8;
++    Serial.print(F("tsv: CNT="));
++    Serial.print(i, DEC);
++    i = readByte(end+3);
++    if (i & 0xf) {
++      Serial.print(F(" COLLCNT="));
++      Serial.print(i & 0xf, DEC);
+     }
+-  Serial.println();
+-  Serial.print(F("eir: "));
+-  Serial.print(eir,BIN);
+-  Serial.println();
++    if ((i>>4) & 0x1) Serial.print(F(" CRCERR"));
++    if ((i>>5) & 0x1) Serial.print(F(" LENERR"));
++    if ((i>>6) & 0x1) Serial.print(F(" LENRANGE"));
++    if ((i>>7) & 0x1) Serial.print(F(" TDONE"));
++    i = readByte(end+4);
++    if ((i>>0) & 0x1) Serial.print(F(" MCAST"));
++    if ((i>>1) & 0x1) Serial.print(F(" BCAST"));
++    if ((i>>2) & 0x1) Serial.print(F(" PACKETDEFER"));
++    if ((i>>3) & 0x1) Serial.print(F(" EXCESSIVEDEFER"));
++    if ((i>>4) & 0x1) Serial.print(F(" EXCESSIVECOLLS"));
++    if ((i>>5) & 0x1) Serial.print(F(" LATECOLLS"));
++    if ((i>>6) & 0x1) Serial.print(F(" GIANT"));
++    if ((i>>7) & 0x1) Serial.print(F(" UNDERRUN"));
++    i = readByte(end+5);
++    i |= readByte(end+6) << 8;
++    Serial.print(F(" WIRECNT="));
++    Serial.print(i, DEC);
++    i = readByte(end+7);
++    if ((i>>0) & 0x1) Serial.print(F(" CTRL"));
++    if ((i>>1) & 0x1) Serial.print(F(" PAUSE"));
++    if ((i>>2) & 0x1) Serial.print(F(" BACKPRESSURE"));
++    if ((i>>3) & 0x1) Serial.print(F(" VLAN"));
++
++    for (uint16_t i=end+1; i<= end+UIP_SENDBUFFER_PADDING; i++)
++      {
++	Serial.print(" ");
++	Serial.print(readByte(i),HEX);
++      }
++    Serial.println();
++  }
++  do {
++    Serial.print(F("eir: 0x"));
++    Serial.print(eir, HEX);
++    if ((eir>>7) & 0x1) Serial.print(F(" BIT7"));
++    if ((eir>>6) & 0x1) Serial.print(F(" PKTIF"));
++    if ((eir>>5) & 0x1) Serial.print(F(" DMAIF"));
++    if ((eir>>4) & 0x1) Serial.print(F(" LINKIF"));
++    if ((eir>>3) & 0x1) Serial.print(F(" TXIF"));
++    if ((eir>>2) & 0x1) Serial.print(F(" BIT2"));
++    if ((eir>>1) & 0x1) Serial.print(F(" TXERIF"));
++    if ((eir>>0) & 0x1) Serial.print(F(" RXERIF"));
++    Serial.println();
++    if (timeout) {
++      delay(1000);
++    }
++  } while (timeout);
+ #endif
+   return (eir & EIR_TXERIF) == 0;
+ }
+diff --git a/utility/Enc28J60Network.h b/utility/Enc28J60Network.h
+index f598655..a253aeb 100644
+--- a/utility/Enc28J60Network.h
++++ b/utility/Enc28J60Network.h
+@@ -38,7 +38,7 @@
+ #define UIP_SENDBUFFER_PADDING 7
+ #define UIP_SENDBUFFER_OFFSET 1
+ 
+-//#define ENC28J60DEBUG
++#define ENC28J60DEBUG
+ 
+ /*
+  * Empfangen von ip-header, arp etc...
